@@ -1,0 +1,103 @@
+free c:channel.
+
+type pq_skey.
+type pq_pkey.
+type cert.
+
+fun getpk(pq_skey): pq_pkey.
+fun sign(bitstring, pq_skey): bitstring.
+fun concat(bitstring, bitstring): bitstring.
+fun concat5(bitstring, bitstring,bitstring,bitstring,bitstring): bitstring.
+fun gen_cert(bitstring, pq_pkey,pq_skey): cert.
+fun cert_to_bit(cert): bitstring [data, typeConverter].
+fun bit_to_cert(bitstring): cert [typeConverter].
+
+reduc forall m: bitstring, sk: pq_skey; checksign(sign(m, sk), getpk(sk)) = m.
+
+reduc forall pid: bitstring, sk_ca:pq_skey, pk: pq_pkey; verify_cert(gen_cert(pid, pk,sk_ca), getpk(sk_ca))=pk.
+
+reduc forall pid: bitstring, md: bitstring; get_pid_from_rid(concat(pid, md)) = pid.
+
+reduc forall pid: bitstring, pk: pq_pkey, sk_ca: pq_skey; get_pid_from_cert(gen_cert(pid, pk, sk_ca)) = pid.
+
+event signByGCS(bitstring).
+event signByD(bitstring, bitstring).        (* rid, authRes *)
+event validAuthReq(bitstring).
+event validAuthRes(bitstring, bitstring).   (* rid, authRes *)
+
+free unique_id: bitstring [private].
+
+query m: bitstring;
+  event(validAuthReq(m)) ==> event(signByGCS(m)).
+
+query rid: bitstring, m: bitstring;
+  event(validAuthRes(rid, m)) ==> event(signByD(rid, m)).
+
+query attacker(unique_id).
+
+(* ----- drone: event occurs after recieved data from GCS ----- *)
+let drone(rid_D: bitstring, pkGCS: pq_pkey, pkD_i: pq_pkey,skD_i: pq_skey,cert_D_i: cert, unique_id:bitstring) =
+    in (c, (rid_D': bitstring, t': bitstring, sig_auth: bitstring));
+    let m = concat(rid_D, t') in
+    if m = checksign(sig_auth, pkGCS) then
+        event validAuthReq(m);
+
+    new t'':bitstring;
+    let authRes = concat5(rid_D, t', sig_auth, cert_to_bit(cert_D_i), t'') in
+    let sig_authRes = sign(authRes, skD_i) in
+    event signByD(rid_D, authRes);
+    out (c, (rid_D, t', sig_auth, cert_D_i, t'', sig_authRes)).
+
+
+(* ----- GCS: event occurs after signature generation ----- *)
+let gcs(rid_D: bitstring, pkGCS: pq_pkey, skGCS: pq_skey,pkAU: pq_pkey) =
+    let pid_exp = get_pid_from_rid(rid_D) in
+
+    (* send authReq *)
+    new t': bitstring;
+    let authReq = concat(rid_D, t') in
+    let sig_auth = sign(authReq, skGCS) in
+    event signByGCS(authReq);
+    out (c, (rid_D, t', sig_auth));
+
+    (* receive authRes *)
+    in (c, (rid_D':bitstring, tt':bitstring, ssig_auth:bitstring, cert_D_i:cert, t'':bitstring, sig_authRes:bitstring));
+    let pk_D' = verify_cert(cert_D_i,pkAU) in
+    let pid_from_cert = get_pid_from_cert(cert_D_i) in
+
+    if pid_exp = pid_from_cert then
+        let res = concat5(rid_D', t', ssig_auth, cert_to_bit(cert_D_i), t'') in
+        let mm_check = checksign(sig_authRes, pk_D') in
+        if res = mm_check then
+            event validAuthRes(rid_D', res).
+
+
+(* ----- pqRID process ----- *)
+process
+    (*AU key gen*)
+    new skAU: pq_skey;
+    let pkAU = getpk(skAU) in out (c, pkAU);
+    
+    (* GCS key generation*)
+    new skGCS: pq_skey;
+    let pkGCS = getpk(skGCS) in out (c, pkGCS);
+    
+    (* Impersonation GCS key generation*)
+    new skImpGCS: pq_skey;
+    let pkImpGCS = getpk(skImpGCS) in out (c, pkImpGCS);
+
+    (* Drone key generation and RID generation *)
+    new skD_i: pq_skey;
+    let pkD_i = getpk(skD_i) in out (c, pkD_i);
+    new pid_i: bitstring;
+    new metadata: bitstring;
+    let rid_D = concat(pid_i, metadata) in out (c, rid_D);
+    let cert_D_i = gen_cert(pid_i, pkD_i,skAU) in
+
+    (* Impersonation Drone key generation *)
+    new skImpD: pq_skey;
+    let pkImpD = getpk(skImpD) in out (c, pkImpD);
+    new pidImpD: bitstring;
+    let cert_Imp = gen_cert(pidImpD, pkImpD,skAU) in
+
+    (!drone(rid_D, pkGCS, pkD_i, skD_i, cert_D_i, unique_id)) | (!gcs(rid_D, pkGCS, skGCS, pkAU))| (!impDrone(pkGCS, pkImpD, skImpD, cert_Imp))
